@@ -427,6 +427,7 @@ class ResistOverlayGUI:
         self.config = config
         self.watcher = None
         self._settings_win = None
+        self._last_resists = None
         
         self.root.title("EQ Resist Overlay")
         # Minimal one-line overlay
@@ -466,6 +467,10 @@ class ResistOverlayGUI:
             lbl = ttk.Label(main_frame, text=f"{key}:--", font=("Arial", 10, "bold"), foreground="blue")
             lbl.grid(row=0, column=col, sticky=tk.E, padx=(6, 0))
             self.resist_labels[key] = lbl
+
+        # Share button: copies a ready-to-paste message to clipboard
+        self.share_btn = ttk.Button(main_frame, text="Share", command=self.share_to_raid)
+        self.share_btn.grid(row=0, column=len(resist_keys) + 1, sticky=tk.E, padx=(10, 0))
 
         # Keep overlay minimal: open settings via double-click or right-click
         self.root.bind('<Double-Button-1>', lambda _e: self.open_settings())
@@ -538,9 +543,40 @@ class ResistOverlayGUI:
                 self._settings_win = None
 
         settings_win.protocol("WM_DELETE_WINDOW", _on_close)
+
+    def share_to_raid(self):
+        resists = self._last_resists
+        if not resists:
+            return
+
+        name = resists.get('display_name') or resists.get('name')
+        if not name or str(name).strip() in ('---', ''):
+            return
+
+        try:
+            msg = (
+                f"{name} "
+                f"MR:{resists.get('MR')} CR:{resists.get('CR')} DR:{resists.get('DR')} "
+                f"FR:{resists.get('FR')} PR:{resists.get('PR')}"
+            )
+            self.root.clipboard_clear()
+            self.root.clipboard_append(msg)
+            self.root.update_idletasks()
+            print(f"Copied to clipboard: {msg}")
+        except Exception as e:
+            print(f"Failed to copy share message to clipboard: {e}")
+            return
+
+        # Tiny feedback without a dialog
+        try:
+            self.share_btn.config(text="Copied!")
+            self.root.after(900, lambda: self.share_btn.config(text="Share"))
+        except Exception:
+            pass
     
     def update_display(self, resists):
         """Update overlay with NPC data"""
+        self._last_resists = dict(resists) if resists else None
         # Give the name most of the space; keep it short to avoid pushing resist columns off-screen
         display_name = resists.get('display_name') or resists.get('name') or '---'
         self.name_label.config(text=str(display_name)[:32])
