@@ -1,0 +1,5 @@
+[Wed Feb 05 12:00:00 2026] a furious apprentice scowls at you, ready to attack -- it appears to be quite formidable.
+[Wed Feb 05 12:00:02 2026] a furious apprentice scowls at you, ready to attack -- it appears to be quite formidable.
+[Wed Feb 05 12:34:56 2026] a furious apprentice scowls at you, ready to attack -- it appears to be quite formidable.
+[Wed Feb 05 12:34:58 2026] a furious apprentice scowls at you, ready to attack -- it appears to be quite formidable.
+[Wed Feb 05 13:00:00 2026] a furious apprentice scowls at you, ready to attack -- it appears to be quite formidable.

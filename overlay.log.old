@@ -1,0 +1,20 @@
+Script dir: C:\Users\cleme\EQ_Resist_Overlay
+SQL path: C:\Users\cleme\EQ_Resist_Overlay\npc_types.sql
+SQL exists: True
+==================================================
+EverQuest Resist Overlay
+Starting at 2026-02-05 11:50:53.126398
+==================================================
+Config: show_resists=True show_special_abilities=True overlay_opacity=0.88
+Config log path: C:/EQ/Quarm EQ/eqlog_Jambedebois_pq.proj.txt
+Database has 14467 NPCs
+Database has 13821 NPCs with special abilities
+
+[OK] Overlay running
+[OK] Use /consider command in EQ to see NPC resistances
+[OK] Double-click or right-click the overlay to open settings
+[OK] Close window to exit
+
+Watcher thread started - waiting for EQ log file...
+Watching log file: C:\EQ\Quarm EQ\eqlog_Jambedebois_pq.proj.txt
+Watcher initialized - watching for NEW considers
