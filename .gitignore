@@ -16,9 +16,13 @@ overlay.log
 config.json
 config.json.bak_*
 
-# Generated DB (rebuilt from npc_types.sql)
+# Generated DB (rebuilt from quarm.sql)
 npc_data.db
 *.db-journal
+
+# Quarm SQL dumps (large, local-only)
+quarm.sql
+quarm*.sql
 
 # PyInstaller outputs
 build/

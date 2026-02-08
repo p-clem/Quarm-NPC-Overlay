@@ -39,12 +39,11 @@ python -m PyInstaller `
   --windowed `
   --name $exeBase `
   --icon=NONE `
-  --add-data "npc_types.sql;." `
   --distpath "$dist" `
   --workpath "$build" `
   --specpath "$root" `
   --clean `
-  eq_resist_overlay.py
+  quarm_npc_overlay.py
 
 if ($LASTEXITCODE -ne 0) {
   throw "PyInstaller failed with exit code $LASTEXITCODE"
@@ -56,8 +55,26 @@ if (-not (Test-Path $exe)) {
 }
 
 Write-Host "Building packaged npc_data.db..."
-python .\load_db.py --sql .\npc_types.sql --out (Join-Path $dist "npc_data.db")
+$sqlToUse = $null
+try {
+  $explicit = Join-Path $root "quarm.sql"
+  if (Test-Path $explicit) {
+    $sqlToUse = $explicit
+  } else {
+    $candidate = Get-ChildItem -Path $root -Filter "quarm*.sql" -ErrorAction SilentlyContinue |
+      Sort-Object LastWriteTime -Descending |
+      Select-Object -First 1
+    if ($candidate) { $sqlToUse = $candidate.FullName }
+  }
+} catch {
+  $sqlToUse = $null
+}
 
+if (-not $sqlToUse) {
+  throw "No quarm.sql / quarm*.sql found. Provide a full Quarm SQL dump to build npc_data.db for the release."
+}
+
+python .\load_db.py --sql $sqlToUse --out (Join-Path $dist "npc_data.db")
 if ($LASTEXITCODE -ne 0) {
   throw "load_db.py failed with exit code $LASTEXITCODE"
 }
@@ -68,9 +85,6 @@ Copy-Item -Force $exe $stage
 
 $db = Join-Path $dist "npc_data.db"
 if (Test-Path $db) { Copy-Item -Force $db $stage }
-
-# Include external SQL next to the EXE as a fallback + for easy rebuilds.
-Copy-Item -Force .\npc_types.sql $stage
 
 # Optional docs
 if (Test-Path .\README.md) { Copy-Item -Force .\README.md $stage }

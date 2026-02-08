@@ -17,6 +17,9 @@ class ConfigManager:
             'eq_log_path': None,
             # Tk alpha (0.0-1.0). Lower = more transparent.
             'overlay_opacity': 0.88,
+            # Overlay window position (screen coordinates)
+            # Stored as {"x": int, "y": int}
+            'overlay_position': {'x': 50, 'y': 50},
             # Whether to show the stats row (level/HP/mana/AC).
             'show_stats': True,
             # Whether to show resist values in the overlay.
@@ -39,6 +42,30 @@ class ConfigManager:
             except Exception:
                 pass
         return defaults
+
+    def get_overlay_position(self) -> tuple[int, int]:
+        """Get overlay position as (x, y)."""
+        pos = self.config.get('overlay_position', None)
+        try:
+            if isinstance(pos, dict):
+                x = int(pos.get('x', 50))
+                y = int(pos.get('y', 50))
+            elif isinstance(pos, (list, tuple)) and len(pos) >= 2:
+                x = int(pos[0])
+                y = int(pos[1])
+            else:
+                x, y = 50, 50
+        except Exception:
+            x, y = 50, 50
+        return x, y
+
+    def set_overlay_position(self, x: int, y: int):
+        """Set and save overlay position."""
+        try:
+            self.config['overlay_position'] = {'x': int(x), 'y': int(y)}
+        except Exception:
+            return False
+        return self.save_config()
 
     def save_config(self):
         """Save config to file"""

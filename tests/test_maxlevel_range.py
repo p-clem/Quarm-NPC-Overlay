@@ -58,10 +58,8 @@ def main() -> int:
     except Exception:
         maxlevel_count = 0
 
-    sql_path = REPO_ROOT / "npc_types.sql"
-    if maxlevel_count == 0 and sql_path.exists():
-        print("maxlevel appears unpopulated; backfilling from npc_types.sql...")
-        db.populate_from_sql(str(sql_path))
+    # NOTE: This repo no longer ships npc_types.sql. If maxlevel is unpopulated,
+    # rebuild your DB from a full Quarm dump (quarm.sql / quarm_*.sql).
 
     cursor.execute(
         """

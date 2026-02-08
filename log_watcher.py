@@ -20,11 +20,14 @@ class EQLogWatcher:
         self._last_missing_config_path = None
         self.log_file = self._find_eq_log()
         self.first_run = True
+        self.current_zone_long = None
+        self.current_zone_short = None
         # Compile consider regex once
         self.consider_re = re.compile(
             r'^(?P<target>.*?)\s+(?P<faction>scowls|glar(?:es|es).*?|glowers|is|looks|judges?|kindly|regards).*?(?P<sep>-- )?(?P<diff>.*)?$',
             re.IGNORECASE
         )
+        self.entered_re = re.compile(r'^You have entered (?P<zone>.+?)\.$', re.IGNORECASE)
 
     def _find_eq_log(self):
         """Find the EQ log file.
@@ -131,6 +134,24 @@ class EQLogWatcher:
                                 # Remove timestamp prefix [Day Mon DD HH:MM:SS YYYY]
                                 clean_line = re.sub(r'^\[.*?\]\s+', '', line.strip())
 
+                                # Track current zone (helps disambiguate NPCs with non-unique names)
+                                try:
+                                    m_zone = self.entered_re.match(clean_line)
+                                    if m_zone:
+                                        zone_long = (m_zone.group('zone') or '').strip()
+                                        self.current_zone_long = zone_long
+                                        try:
+                                            zcur = db_conn.cursor()
+                                            self.current_zone_short = self.db.get_zone_short_name(zone_long, cursor=zcur)
+                                        except Exception:
+                                            self.current_zone_short = None
+                                        if self.current_zone_short:
+                                            print(f"[ZONE] Entered {zone_long} ({self.current_zone_short})")
+                                        else:
+                                            print(f"[ZONE] Entered {zone_long}")
+                                except Exception:
+                                    pass
+
                                 # Match proper EQ consider format
                                 match = self.consider_re.match(clean_line)
                                 if match:
@@ -145,59 +166,40 @@ class EQLogWatcher:
                                         except Exception:
                                             pass
 
-                                    # Query database using thread-local connection
                                     cursor = db_conn.cursor()
-                                    result = None
-                                    matched_key = None
-                                    keys = npc_lookup_keys(npc_name)
-                                    if debug_specials:
+                                    resists = self.db.get_npc_resists(
+                                        npc_name,
+                                        cursor=cursor,
+                                        zone_short_name=self.current_zone_short,
+                                    )
+                                    if resists:
+                                        # Always include current zone context for display.
+                                        resists['current_zone_long'] = self.current_zone_long
+                                        resists['current_zone_short'] = self.current_zone_short
+
+                                        # Prefer the in-game name for display, with a small ambiguity marker.
+                                        display_name = npc_name
+                                        if resists.get('ambiguous'):
+                                            display_name = f"{npc_name} (?)"
+                                        resists['display_name'] = display_name
+
                                         try:
-                                            print(f"[DEBUG] lookup_keys={keys!r}")
+                                            zs = self.current_zone_short
+                                            zl = self.current_zone_long
+                                            if zl and not zs:
+                                                print(f"[WARN] Zone known but not resolved to short_name: {zl!r}; zone-filtered lookup disabled")
+                                            print(f"[LOOKUP] zone_short={zs!r} npc={npc_name!r} ambiguous={bool(resists.get('ambiguous'))}")
                                         except Exception:
                                             pass
 
-                                    for key in keys:
-                                        cursor.execute('''
-                                            SELECT name, level, maxlevel, hp, mana, mindmg, maxdmg, ac, mr, cr, dr, fr, pr, special_abilities FROM npcs WHERE name_lower = ?
-                                        ''', (key.lower(),))
-                                        result = cursor.fetchone()
-                                        if result:
-                                            matched_key = key
-                                            break
-
-                                    if result:
-                                        special_raw = result[13] if len(result) > 13 else ''
-                                        special_labels = parse_special_abilities(special_raw) if special_raw else ''
-                                        if debug_specials:
-                                            try:
-                                                print(f"[DEBUG] matched_key={matched_key!r} db_name={result[0]!r}")
-                                                print(f"[DEBUG] special_raw={special_raw!r} (len={len(special_raw) if special_raw is not None else 'None'})")
-                                                print(f"[DEBUG] special_labels={special_labels!r}")
-                                            except Exception:
-                                                pass
-                                        resists = {
-                                            # Keep DB name for reference, but prefer the in-game name for display.
-                                            'name': result[0],
-                                            'display_name': npc_name,
-                                            'level': result[1],
-                                            'maxlevel': result[2],
-                                            'hp': result[3],
-                                            'mana': result[4],
-                                            'mindmg': result[5],
-                                            'maxdmg': result[6],
-                                            'ac': result[7],
-                                            'MR': result[8],
-                                            'CR': result[9],
-                                            'DR': result[10],
-                                            'FR': result[11],
-                                            'PR': result[12],
-                                            'special_abilities': special_raw,
-                                            'special_abilities_labels': special_labels,
-                                        }
                                         print(
                                             f"Match found: {npc_name} - MR:{resists['MR']} CR:{resists['CR']} "
                                             f"DR:{resists['DR']} FR:{resists['FR']} PR:{resists['PR']}"
                                         )
+                                        if resists.get('ambiguous'):
+                                            mc = resists.get('match_count')
+                                            mc_txt = f"{mc}" if isinstance(mc, int) and mc > 0 else "multiple"
+                                            print(f"[WARN] Ambiguous NPC name: {npc_name} matched {mc_txt} DB rows; showing best guess")
                                         self.callback(resists)
                                     else:
                                         print(f"No resists found for: {npc_name}")

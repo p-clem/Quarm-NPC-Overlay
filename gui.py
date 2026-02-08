@@ -31,7 +31,15 @@ class ResistOverlayGUI:
         self._show_special_abilities = self.config.get_show_special_abilities() if self.config else False
         self._specials_filter = self.config.get_special_abilities_filter() if self.config else {}
         self._width = 520
-        self._pos = "+50+50"
+        # Window position should persist and never reset during resizes.
+        try:
+            x, y = self.config.get_overlay_position() if self.config else (50, 50)
+        except Exception:
+            x, y = 50, 50
+        self._x = int(x)
+        self._y = int(y)
+        self._save_pos_after_id = None
+        self._is_applying_geometry = False
         self._main_frame = None
         # Wrap special abilities by commas (not by spaces)
         self._specials_wrap_chars = 62
@@ -39,7 +47,7 @@ class ResistOverlayGUI:
         self.root.title("Quarm NPC Overlay")
         # Set an initial size; we'll recompute precisely after widgets exist.
         try:
-            self.root.geometry(f"{self._width}x60{self._pos}")
+            self.root.geometry(f"{self._width}x60+{self._x}+{self._y}")
         except Exception:
             pass
         self.root.attributes('-topmost', True)
@@ -134,6 +142,54 @@ class ResistOverlayGUI:
         # Opacity hotkeys: Ctrl+Up / Ctrl+Down (persisted)
         self.root.bind('<Control-Up>', lambda _e: self._adjust_opacity(+0.05))
         self.root.bind('<Control-Down>', lambda _e: self._adjust_opacity(-0.05))
+
+        # Track window moves so resizes keep the last position.
+        try:
+            self.root.bind('<Configure>', self._on_root_configure)
+        except Exception:
+            pass
+
+    def _on_root_configure(self, event):
+        try:
+            if getattr(event, 'widget', None) is not self.root:
+                return
+            if self._is_applying_geometry:
+                return
+
+            # For Toplevel/Tk, Configure has screen coords.
+            x = int(getattr(event, 'x', self._x))
+            y = int(getattr(event, 'y', self._y))
+
+            # Ignore obviously bogus values (can happen during init).
+            if x == 0 and y == 0:
+                return
+
+            if x != self._x or y != self._y:
+                self._x, self._y = x, y
+                self._debounced_save_position()
+        except Exception:
+            return
+
+    def _debounced_save_position(self):
+        if not self.config:
+            return
+        try:
+            if self._save_pos_after_id is not None:
+                try:
+                    self.root.after_cancel(self._save_pos_after_id)
+                except Exception:
+                    pass
+
+            def _save():
+                self._save_pos_after_id = None
+                try:
+                    self.config.set_overlay_position(self._x, self._y)
+                except Exception:
+                    pass
+
+            self._save_pos_after_id = self.root.after(300, _save)
+        except Exception:
+            pass
 
     def _adjust_opacity(self, delta):
         self._opacity = max(0.3, min(1.0, float(self._opacity) + float(delta)))
@@ -320,10 +376,22 @@ class ResistOverlayGUI:
         # Add a tiny buffer so the last row never clips.
         height = max(40, int(height) + 2)
 
+        # Preserve current position during geometry updates.
         try:
-            self.root.geometry(f"{self._width}x{height}{self._pos}")
+            try:
+                x_now = int(self.root.winfo_x())
+                y_now = int(self.root.winfo_y())
+                if not (x_now == 0 and y_now == 0):
+                    self._x, self._y = x_now, y_now
+            except Exception:
+                pass
+
+            self._is_applying_geometry = True
+            self.root.geometry(f"{self._width}x{height}+{self._x}+{self._y}")
         except Exception:
             pass
+        finally:
+            self._is_applying_geometry = False
 
     def _apply_visibility(self):
         try:
@@ -477,9 +545,30 @@ class ResistOverlayGUI:
                 self.stats_labels['dmg'].config(text=f"Dmg:{dmg_text}")
         except Exception:
             pass
-        # Give the name most of the space; keep it short to avoid pushing resist columns off-screen
+        # Always show current zone next to NPC name.
         display_name = resists.get('display_name') or resists.get('name') or '---'
-        self.name_label.config(text=str(display_name)[:32])
+        zone_long = resists.get('current_zone_long')
+        zone_short = resists.get('current_zone_short')
+        zone_text = None
+        try:
+            if zone_long and str(zone_long).strip():
+                zone_text = str(zone_long).strip()
+            elif zone_short and str(zone_short).strip():
+                zone_text = str(zone_short).strip()
+        except Exception:
+            zone_text = None
+
+        if not zone_text:
+            zone_text = 'Unknown'
+
+        display_name = f"{display_name} ({zone_text})"
+        try:
+            if resists.get('ambiguous') and '(?)' not in str(display_name):
+                display_name = f"{display_name} (?)"
+        except Exception:
+            pass
+        # Allow longer names since resists are on their own row.
+        self.name_label.config(text=str(display_name)[:64])
         for key in self.resist_labels:
             value = resists[key]
             color = "green" if value < 0 else "red" if value > 50 else "orange"
