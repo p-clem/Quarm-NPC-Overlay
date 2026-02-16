@@ -1,599 +1,769 @@
+import os
+import sys
+
+HAS_QT = False
+QApplication = None
+
 try:
-    import tkinter as tk
-    from tkinter import ttk
-    from tkinter import messagebox
-    from tkinter import filedialog
-    import os
-    HAS_TK = True
+    from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint, QSize
+    from PyQt6.QtWidgets import (
+        QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
+        QDialog, QCheckBox, QSlider, QFileDialog, QMessageBox, QSystemTrayIcon,
+        QMenu, QScrollArea, QGridLayout, QGroupBox, QSizePolicy, QFrame,
+    )
+    from PyQt6.QtGui import (
+        QColor, QPainter, QBrush, QFont, QIcon, QPixmap, QPainterPath, QAction,
+    )
+    HAS_QT = True
 except ImportError:
-    tk = None
-    ttk = None
-    messagebox = None
-    filedialog = None
-    os = None
-    HAS_TK = False
+    pass
+
+_IS_WINDOWS = sys.platform == 'win32'
+_HAS_CTYPES = False
+if _IS_WINDOWS:
+    try:
+        import ctypes
+        import ctypes.wintypes
+        _HAS_CTYPES = True
+    except ImportError:
+        pass
 
 from special_abilities import SPECIAL_ABILITIES, parse_special_abilities_ids
 from utils import format_level_text
 
 
-class ResistOverlayGUI:
-    """Simple tkinter overlay window"""
+# ---------------------------------------------------------------------------
+# Colour helpers
+# ---------------------------------------------------------------------------
+def _resist_color(value):
+    try:
+        v = int(value)
+    except Exception:
+        return "#aaaaaa"
+    if v < 0:
+        return "#44cc44"
+    if v > 50:
+        return "#ee4444"
+    return "#ee8822"
 
-    def __init__(self, root, config):
-        self.root = root
-        self.config = config
-        self.watcher = None
-        self._settings_win = None
-        self._last_resists = None
-        self._show_stats = self.config.get_show_stats() if self.config else True
-        self._show_resists = self.config.get_show_resists() if self.config else True
-        self._show_special_abilities = self.config.get_show_special_abilities() if self.config else False
-        self._specials_filter = self.config.get_special_abilities_filter() if self.config else {}
-        self._width = 520
-        # Window position should persist and never reset during resizes.
-        try:
-            x, y = self.config.get_overlay_position() if self.config else (50, 50)
-        except Exception:
-            x, y = 50, 50
-        self._x = int(x)
-        self._y = int(y)
-        self._save_pos_after_id = None
-        self._is_applying_geometry = False
-        self._main_frame = None
-        # Wrap special abilities by commas (not by spaces)
-        self._specials_wrap_chars = 62
 
-        self.root.title("Quarm NPC Overlay")
-        # Set an initial size; we'll recompute precisely after widgets exist.
-        try:
-            self.root.geometry(f"{self._width}x60+{self._x}+{self._y}")
-        except Exception:
-            pass
-        self.root.attributes('-topmost', True)
-        # Modern translucent overlay effect (user adjustable)
-        self._opacity = self.config.get_overlay_opacity() if self.config else 0.88
-        self.root.attributes('-alpha', self._opacity)
+def _make_label_style(color="#ffffff", size=10, bold=True):
+    weight = "bold" if bold else "normal"
+    return f"color: {color}; font-size: {size}pt; font-weight: {weight}; background: transparent;"
 
-        # Make window click-through if possible
-        try:
-            self.root.attributes('-type', 'splash')
-        except Exception:
-            pass
 
-        # Ensure the overlay is visible on launch (helps when started from a terminal)
-        try:
-            self.root.update_idletasks()
-            self.root.lift()
-            self.root.focus_force()
-            self.root.after(200, self.root.lift)
-        except Exception:
-            pass
+# ---------------------------------------------------------------------------
+# Main overlay widget
+# ---------------------------------------------------------------------------
+if HAS_QT:
+    class ResistOverlayGUI(QWidget):
+        """PyQt6 frameless overlay with per-element transparency."""
 
-        # Create main frame
-        main_frame = ttk.Frame(root, padding="4")
-        self._main_frame = main_frame
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        # Thread-safe bridge: emit from watcher thread, slot runs on GUI thread
+        npc_updated = pyqtSignal(object)
 
-        # Make the root grid expand so main_frame can fill the full window width.
-        try:
-            self.root.grid_columnconfigure(0, weight=1)
-            self.root.grid_rowconfigure(0, weight=1)
-        except Exception:
-            pass
+        def __init__(self, config, parent=None):
+            super().__init__(parent)
+            self.config = config
+            self.watcher = None
+            self._last_resists = None
+            self._settings_win = None
 
-        main_frame.columnconfigure(0, weight=1)
-        main_frame.columnconfigure(1, weight=0)
+            self._show_stats = config.get_show_stats() if config else True
+            self._show_resists = config.get_show_resists() if config else True
+            self._show_special_abilities = config.get_show_special_abilities() if config else True
+            self._specials_filter = config.get_special_abilities_filter() if config else {}
+            self._specials_wrap_chars = 72
 
-        # Row 0: NPC name + Share button
-        self.name_label = ttk.Label(main_frame, text="---", font=("Arial", 11, "bold"))
-        self.name_label.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N), padx=(0, 10))
+            self._bg_opacity = config.get_overlay_opacity() if config else 0.88
+            self._locked = config.get_overlay_locked() if config else False
+            self._hotkey_registered = False
+            self._hotkey_id = 9001
 
-        # Share button: copies a ready-to-paste message to clipboard
-        self.share_btn = ttk.Button(main_frame, text="Share", command=self.share_to_raid)
-        self.share_btn.grid(row=0, column=1, sticky=(tk.N, tk.E))
+            # Drag state
+            self._drag_pos = None
 
-        # Row 1: stats
-        self.stats_frame = ttk.Frame(main_frame)
-        self.stats_frame.grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(2, 0))
+            # Position save debounce
+            self._save_timer = QTimer(self)
+            self._save_timer.setSingleShot(True)
+            self._save_timer.setInterval(300)
+            self._save_timer.timeout.connect(self._save_position)
 
-        self.stats_labels = {}
-        stats = [
-            ('Lv', 'level'),
-            ('HP', 'hp'),
-            ('Mana', 'mana'),
-            ('AC', 'ac'),
-            ('Dmg', 'dmg'),
-        ]
-        for col, (label, key) in enumerate(stats):
-            lbl = ttk.Label(self.stats_frame, text=f"{label}:--", font=("Arial", 9, "bold"), foreground="#333")
-            lbl.grid(row=0, column=col, sticky=tk.W, padx=(0, 10))
-            self.stats_labels[key] = lbl
-
-        # Row 2: resists
-        self.resist_frame = ttk.Frame(main_frame)
-        self.resist_frame.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(2, 0))
-
-        self.resist_labels = {}
-        resist_keys = ['MR', 'CR', 'DR', 'FR', 'PR']
-        for col, key in enumerate(resist_keys, start=1):
-            lbl = ttk.Label(self.resist_frame, text=f"{key}:--", font=("Arial", 10, "bold"), foreground="blue")
-            lbl.grid(row=0, column=col - 1, sticky=tk.W, padx=(0, 10))
-            self.resist_labels[key] = lbl
-
-        # Row 3: special abilities
-        self.special_label = ttk.Label(
-            main_frame,
-            text="",
-            font=("Arial", 9, "bold"),
-            foreground="#222",
-            wraplength=0,
-            justify="left",
-            anchor="w",
-        )
-        self.special_label.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(2, 0))
-
-        self._apply_visibility()
-
-        # Keep overlay minimal: open settings via double-click or right-click
-        self.root.bind('<Double-Button-1>', lambda _e: self.open_settings())
-        self.root.bind('<Button-3>', lambda _e: self.open_settings())
-
-        # Opacity hotkeys: Ctrl+Up / Ctrl+Down (persisted)
-        self.root.bind('<Control-Up>', lambda _e: self._adjust_opacity(+0.05))
-        self.root.bind('<Control-Down>', lambda _e: self._adjust_opacity(-0.05))
-
-        # Track window moves so resizes keep the last position.
-        try:
-            self.root.bind('<Configure>', self._on_root_configure)
-        except Exception:
-            pass
-
-    def _on_root_configure(self, event):
-        try:
-            if getattr(event, 'widget', None) is not self.root:
-                return
-            if self._is_applying_geometry:
-                return
-
-            # For Toplevel/Tk, Configure has screen coords.
-            x = int(getattr(event, 'x', self._x))
-            y = int(getattr(event, 'y', self._y))
-
-            # Ignore obviously bogus values (can happen during init).
-            if x == 0 and y == 0:
-                return
-
-            if x != self._x or y != self._y:
-                self._x, self._y = x, y
-                self._debounced_save_position()
-        except Exception:
-            return
-
-    def _debounced_save_position(self):
-        if not self.config:
-            return
-        try:
-            if self._save_pos_after_id is not None:
-                try:
-                    self.root.after_cancel(self._save_pos_after_id)
-                except Exception:
-                    pass
-
-            def _save():
-                self._save_pos_after_id = None
-                try:
-                    self.config.set_overlay_position(self._x, self._y)
-                except Exception:
-                    pass
-
-            self._save_pos_after_id = self.root.after(300, _save)
-        except Exception:
-            pass
-
-    def _adjust_opacity(self, delta):
-        self._opacity = max(0.3, min(1.0, float(self._opacity) + float(delta)))
-        try:
-            self.root.attributes('-alpha', self._opacity)
-        except Exception:
-            return
-        try:
-            if self.config:
-                self.config.set_overlay_opacity(self._opacity)
-        except Exception:
-            pass
-
-    def open_settings(self):
-        """Open settings dialog"""
-        try:
-            if self._settings_win is not None and self._settings_win.winfo_exists():
-                self._settings_win.lift()
-                self._settings_win.focus_force()
-                return
-        except Exception:
-            pass
-
-        settings_win = tk.Toplevel(self.root)
-        self._settings_win = settings_win
-        settings_win.title("Quarm NPC Overlay - Settings")
-        settings_win.geometry("520x520")
-        settings_win.attributes('-topmost', True)
-
-        frame = ttk.Frame(settings_win, padding="10")
-        frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-
-        # Current path display
-        ttk.Label(frame, text="Quarm Log Path:", font=("Arial", 10)).grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
-
-        current_path = self.config.get_eq_log_path() or "Not set"
-        path_label = ttk.Label(frame, text=current_path, font=("Arial", 9), foreground="blue", wraplength=350)
-        path_label.grid(row=1, column=0, sticky=tk.W, pady=(0, 10))
-
-        # Browse button
-        def browse_file():
-            file_path = filedialog.askopenfilename(
-                title="Select Quarm Log File",
-                filetypes=[("Log files", "eqlog_*.txt"), ("Text files", "*.txt"), ("All files", "*.*")]
+            # Window flags: frameless, always on top, tool window (skip taskbar)
+            self.setWindowFlags(
+                Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.WindowStaysOnTopHint
+                | Qt.WindowType.Tool
             )
-            if file_path:
-                self.config.set_eq_log_path(file_path)
-                path_label.config(text=file_path)
-                messagebox.showinfo(
-                    "Success",
-                    "Log path saved!\n\nThe overlay will begin reading new /consider lines shortly."
-                )
-                try:
-                    settings_win.destroy()
-                except Exception:
-                    pass
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            self.setMinimumWidth(420)
 
-        browse_btn = ttk.Button(frame, text="Browse for Log File", command=browse_file)
-        browse_btn.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
-
-        show_resists_var = tk.BooleanVar(value=self._show_resists)
-        show_specials_var = tk.BooleanVar(value=self._show_special_abilities)
-        show_stats_var = tk.BooleanVar(value=self._show_stats)
-
-        def toggle_show_stats():
-            self._show_stats = bool(show_stats_var.get())
-            if self.config:
-                self.config.set_show_stats(self._show_stats)
-            self._apply_visibility()
-            if self._last_resists:
-                try:
-                    self.update_display(self._last_resists)
-                except Exception:
-                    pass
-
-        def toggle_show_resists():
-            self._show_resists = bool(show_resists_var.get())
-            if self.config:
-                self.config.set_show_resists(self._show_resists)
-            self._apply_visibility()
-            if self._last_resists:
-                try:
-                    self.update_display(self._last_resists)
-                except Exception:
-                    pass
-
-        def toggle_show_specials():
-            self._show_special_abilities = bool(show_specials_var.get())
-            if self.config:
-                self.config.set_show_special_abilities(self._show_special_abilities)
-            self._apply_visibility()
-            _apply_specials_filter_visibility()
-            if self._last_resists:
-                try:
-                    self.update_display(self._last_resists)
-                except Exception:
-                    pass
-
-        show_stats_cb = ttk.Checkbutton(frame, text="Show stats", variable=show_stats_var, command=toggle_show_stats)
-        show_stats_cb.grid(row=3, column=0, sticky=tk.W)
-
-        show_resists_cb = ttk.Checkbutton(frame, text="Show resists", variable=show_resists_var, command=toggle_show_resists)
-        show_resists_cb.grid(row=4, column=0, sticky=tk.W)
-
-        show_specials_cb = ttk.Checkbutton(frame, text="Show special abilities", variable=show_specials_var, command=toggle_show_specials)
-        show_specials_cb.grid(row=5, column=0, sticky=tk.W)
-
-        # Per-ability checklist (only visible when specials are enabled)
-        specials_frame = ttk.Labelframe(frame, text="Special abilities to show", padding="8")
-        specials_frame.grid(row=6, column=0, sticky=(tk.W, tk.E), pady=(8, 0))
-
-        # Scrollable area
-        canvas = tk.Canvas(specials_frame, highlightthickness=0, height=260)
-        scrollbar = ttk.Scrollbar(specials_frame, orient="vertical", command=canvas.yview)
-        inner = ttk.Frame(canvas)
-
-        inner.bind(
-            "<Configure>",
-            lambda _e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-        canvas.create_window((0, 0), window=inner, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        canvas.grid(row=0, column=0, sticky=(tk.W, tk.E))
-        scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
-        specials_frame.columnconfigure(0, weight=1)
-
-        # Build vars from config filter; missing IDs default to shown
-        ability_vars = {}
-        for idx, (aid, name) in enumerate(sorted(SPECIAL_ABILITIES.items(), key=lambda x: x[0])):
-            enabled = self._specials_filter.get(str(aid), True)
-            var = tk.BooleanVar(value=bool(enabled))
-            ability_vars[aid] = var
-
-            def _make_cmd(_aid=aid, _var=var):
-                def _cmd():
-                    self._specials_filter[str(_aid)] = bool(_var.get())
-                    if self.config:
-                        self.config.set_special_ability_enabled(_aid, bool(_var.get()))
-                    if self._last_resists:
-                        try:
-                            self.update_display(self._last_resists)
-                        except Exception:
-                            pass
-                return _cmd
-
-            cb = ttk.Checkbutton(inner, text=f"{aid}: {name}", variable=var, command=_make_cmd())
-            cb.grid(row=idx // 2, column=idx % 2, sticky=tk.W, padx=(0, 18), pady=(0, 2))
-
-        def _apply_specials_filter_visibility():
+            # Restore position
             try:
-                if self._show_special_abilities:
-                    specials_frame.grid()
+                x, y = config.get_overlay_position() if config else (50, 50)
+            except Exception:
+                x, y = 50, 50
+            self.move(int(x), int(y))
+
+            self._build_ui()
+            self._apply_visibility()
+
+            # Connect signal
+            self.npc_updated.connect(self._on_npc_updated)
+
+            # System tray
+            self._tray_icon = None
+            self._build_tray()
+
+            # Click-through + global hotkey (Windows)
+            if _IS_WINDOWS and _HAS_CTYPES:
+                QTimer.singleShot(500, self._apply_click_through)
+                self._register_global_hotkey()
+
+        # ---- UI construction --------------------------------------------------
+
+        def _build_ui(self):
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(10, 8, 10, 8)
+            layout.setSpacing(4)
+
+            # Row 0: NPC name + gear + share
+            top_row = QHBoxLayout()
+            top_row.setSpacing(6)
+
+            self.name_label = QLabel("---")
+            self.name_label.setStyleSheet(_make_label_style("#ffffff", 11, True))
+            self.name_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            top_row.addWidget(self.name_label)
+
+            self.gear_btn = QPushButton("\u2699")
+            self.gear_btn.setFixedSize(28, 28)
+            self.gear_btn.setStyleSheet(
+                "QPushButton { background: rgba(255,255,255,30); color: white; border: none; border-radius: 4px; font-size: 14pt; }"
+                "QPushButton:hover { background: rgba(255,255,255,60); }"
+            )
+            self.gear_btn.clicked.connect(self.open_settings)
+            top_row.addWidget(self.gear_btn)
+
+            self.share_btn = QPushButton("Share")
+            self.share_btn.setFixedHeight(28)
+            self.share_btn.setStyleSheet(
+                "QPushButton { background: rgba(255,255,255,30); color: white; border: none; border-radius: 4px; font-size: 9pt; padding: 0 8px; }"
+                "QPushButton:hover { background: rgba(255,255,255,60); }"
+            )
+            self.share_btn.clicked.connect(self.share_to_raid)
+            top_row.addWidget(self.share_btn)
+
+            layout.addLayout(top_row)
+
+            # Row 1: stats
+            self.stats_widget = QWidget()
+            stats_layout = QHBoxLayout(self.stats_widget)
+            stats_layout.setContentsMargins(0, 0, 0, 0)
+            stats_layout.setSpacing(12)
+
+            self.stats_labels = {}
+            for label, key in [('Lv', 'level'), ('HP', 'hp'), ('Mana', 'mana'), ('AC', 'ac'), ('Dmg', 'dmg')]:
+                lbl = QLabel(f"{label}:--")
+                lbl.setStyleSheet(_make_label_style("#cccccc", 9, True))
+                stats_layout.addWidget(lbl)
+                self.stats_labels[key] = lbl
+            stats_layout.addStretch()
+            layout.addWidget(self.stats_widget)
+
+            # Row 2: resists
+            self.resist_widget = QWidget()
+            resist_layout = QHBoxLayout(self.resist_widget)
+            resist_layout.setContentsMargins(0, 0, 0, 0)
+            resist_layout.setSpacing(12)
+
+            self.resist_labels = {}
+            for key in ['MR', 'CR', 'DR', 'FR', 'PR']:
+                lbl = QLabel(f"{key}:--")
+                lbl.setStyleSheet(_make_label_style("#aaaaaa", 10, True))
+                resist_layout.addWidget(lbl)
+                self.resist_labels[key] = lbl
+            resist_layout.addStretch()
+            layout.addWidget(self.resist_widget)
+
+            # Row 3: special abilities
+            self.special_label = QLabel("")
+            self.special_label.setStyleSheet(_make_label_style("#dddddd", 9, True))
+            self.special_label.setWordWrap(True)
+            layout.addWidget(self.special_label)
+
+            self.setLayout(layout)
+
+        # ---- Paint translucent background ------------------------------------
+
+        def paintEvent(self, event):
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            alpha = max(0, min(255, int(self._bg_opacity * 255)))
+            p.setBrush(QBrush(QColor(30, 30, 30, alpha)))
+            p.setPen(Qt.PenStyle.NoPen)
+            path = QPainterPath()
+            path.addRoundedRect(0.0, 0.0, float(self.width()), float(self.height()), 8.0, 8.0)
+            p.drawPath(path)
+            p.end()
+
+        # ---- Mouse drag / context menu / double-click ------------------------
+
+        def mousePressEvent(self, event):
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                event.accept()
+            elif event.button() == Qt.MouseButton.RightButton:
+                self.open_settings()
+                event.accept()
+
+        def mouseMoveEvent(self, event):
+            if self._drag_pos is not None and event.buttons() & Qt.MouseButton.LeftButton:
+                new_pos = event.globalPosition().toPoint() - self._drag_pos
+                self.move(new_pos)
+                self._save_timer.start()
+                event.accept()
+
+        def mouseReleaseEvent(self, event):
+            self._drag_pos = None
+
+        def mouseDoubleClickEvent(self, event):
+            self.open_settings()
+            event.accept()
+
+        # ---- Position persistence -------------------------------------------
+
+        def _save_position(self):
+            if self.config:
+                try:
+                    pos = self.pos()
+                    self.config.set_overlay_position(pos.x(), pos.y())
+                except Exception:
+                    pass
+
+        # ---- Visibility helpers ---------------------------------------------
+
+        def _apply_visibility(self):
+            self.stats_widget.setVisible(self._show_stats)
+            self.resist_widget.setVisible(self._show_resists)
+            has_specials = self._show_special_abilities and self.special_label.text().strip() not in ("", "-")
+            self.special_label.setVisible(self._show_special_abilities)
+            self.adjustSize()
+
+        # ---- Click-through (Windows) ----------------------------------------
+
+        def _get_hwnd(self):
+            if not (_IS_WINDOWS and _HAS_CTYPES):
+                return None
+            try:
+                return int(self.winId())
+            except Exception:
+                return None
+
+        def _apply_click_through(self):
+            if not (_IS_WINDOWS and _HAS_CTYPES):
+                return
+            hwnd = self._get_hwnd()
+            if not hwnd:
+                return
+            try:
+                GWL_EXSTYLE = -20
+                WS_EX_TRANSPARENT = 0x00000020
+                WS_EX_LAYERED = 0x00080000
+                style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                if self._locked:
+                    new_style = style | WS_EX_TRANSPARENT | WS_EX_LAYERED
                 else:
-                    specials_frame.grid_remove()
+                    new_style = (style | WS_EX_LAYERED) & ~WS_EX_TRANSPARENT
+                ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new_style)
+                SWP_NOMOVE = 0x0002
+                SWP_NOSIZE = 0x0001
+                SWP_NOZORDER = 0x0004
+                SWP_FRAMECHANGED = 0x0020
+                ctypes.windll.user32.SetWindowPos(
+                    hwnd, None, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+                )
             except Exception:
                 pass
 
-        _apply_specials_filter_visibility()
+        def _toggle_lock(self):
+            self._locked = not self._locked
+            if self.config:
+                self.config.set_overlay_locked(self._locked)
+            self._apply_click_through()
+            self._refresh_tray_menu()
+            state = "locked (click-through)" if self._locked else "unlocked"
+            print(f"[LOCK] Overlay {state}")
 
-        def _on_close():
+        # ---- Global hotkey (Ctrl+Shift+L, Windows) --------------------------
+
+        def _register_global_hotkey(self):
+            if not (_IS_WINDOWS and _HAS_CTYPES):
+                return
             try:
-                settings_win.destroy()
-            finally:
+                MOD_CONTROL = 0x0002
+                MOD_SHIFT = 0x0004
+                VK_L = 0x4C
+                result = ctypes.windll.user32.RegisterHotKey(
+                    None, self._hotkey_id, MOD_CONTROL | MOD_SHIFT, VK_L,
+                )
+                if result:
+                    self._hotkey_registered = True
+                    self._hotkey_timer = QTimer(self)
+                    self._hotkey_timer.setInterval(100)
+                    self._hotkey_timer.timeout.connect(self._poll_global_hotkey)
+                    self._hotkey_timer.start()
+            except Exception:
+                pass
+
+        def _poll_global_hotkey(self):
+            if not self._hotkey_registered:
+                return
+            try:
+                msg = ctypes.wintypes.MSG()
+                WM_HOTKEY = 0x0312
+                PM_REMOVE = 0x0001
+                while ctypes.windll.user32.PeekMessageW(
+                    ctypes.byref(msg), None, WM_HOTKEY, WM_HOTKEY, PM_REMOVE,
+                ):
+                    if msg.wParam == self._hotkey_id:
+                        self._toggle_lock()
+            except Exception:
+                pass
+
+        def _cleanup_hotkey(self):
+            if self._hotkey_registered and _IS_WINDOWS and _HAS_CTYPES:
+                try:
+                    ctypes.windll.user32.UnregisterHotKey(None, self._hotkey_id)
+                except Exception:
+                    pass
+                self._hotkey_registered = False
+
+        # ---- System tray ----------------------------------------------------
+
+        def _build_tray(self):
+            if not QSystemTrayIcon.isSystemTrayAvailable():
+                return
+            # Build a small icon: blue circle with "Q"
+            pix = QPixmap(64, 64)
+            pix.fill(QColor(0, 0, 0, 0))
+            p = QPainter(pix)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setBrush(QBrush(QColor(60, 130, 200)))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(4, 4, 56, 56)
+            p.setPen(QColor(255, 255, 255))
+            font = QFont("Arial", 28, QFont.Weight.Bold)
+            p.setFont(font)
+            p.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, "Q")
+            p.end()
+
+            icon = QIcon(pix)
+            self._tray_icon = QSystemTrayIcon(icon, self)
+            self._tray_icon.setToolTip("Quarm NPC Overlay")
+            self._tray_icon.activated.connect(self._on_tray_activated)
+
+            self._tray_menu = QMenu()
+            self._build_tray_menu()
+            self._tray_icon.setContextMenu(self._tray_menu)
+            self._tray_icon.show()
+
+        def _build_tray_menu(self):
+            self._tray_menu.clear()
+
+            settings_action = QAction("Settings", self)
+            settings_action.triggered.connect(self.open_settings)
+            self._tray_menu.addAction(settings_action)
+
+            lock_text = "Unlock Overlay" if self._locked else "Lock Overlay"
+            lock_action = QAction(lock_text, self)
+            lock_action.triggered.connect(self._toggle_lock)
+            self._tray_menu.addAction(lock_action)
+
+            self._tray_menu.addSeparator()
+
+            exit_action = QAction("Exit", self)
+            exit_action.triggered.connect(self._on_close)
+            self._tray_menu.addAction(exit_action)
+
+        def _refresh_tray_menu(self):
+            if self._tray_icon is not None:
+                try:
+                    self._build_tray_menu()
+                    self._tray_icon.setContextMenu(self._tray_menu)
+                except Exception:
+                    pass
+
+        def _on_tray_activated(self, reason):
+            if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+                self.open_settings()
+
+        # ---- Settings dialog ------------------------------------------------
+
+        def open_settings(self):
+            if self._settings_win is not None:
+                try:
+                    self._settings_win.raise_()
+                    self._settings_win.activateWindow()
+                    return
+                except Exception:
+                    self._settings_win = None
+
+            dlg = QDialog()
+            dlg.setWindowTitle("Quarm NPC Overlay - Settings")
+            dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+            dlg.resize(520, 620)
+            self._settings_win = dlg
+
+            outer = QVBoxLayout(dlg)
+            outer.setSpacing(8)
+
+            # --- Log path ---
+            outer.addWidget(QLabel("Quarm Log Path:"))
+            current_path = self.config.get_eq_log_path() or "Not set"
+            path_label = QLabel(current_path)
+            path_label.setStyleSheet("color: #3377cc;")
+            path_label.setWordWrap(True)
+            outer.addWidget(path_label)
+
+            def browse_file():
+                file_path, _ = QFileDialog.getOpenFileName(
+                    dlg, "Select Quarm Log File", "",
+                    "Log files (eqlog_*.txt);;Text files (*.txt);;All files (*.*)",
+                )
+                if file_path:
+                    self.config.set_eq_log_path(file_path)
+                    path_label.setText(file_path)
+                    QMessageBox.information(
+                        dlg, "Success",
+                        "Log path saved!\n\nThe overlay will begin reading new /consider lines shortly.",
+                    )
+                    dlg.close()
+
+            browse_btn = QPushButton("Browse for Log File")
+            browse_btn.clicked.connect(browse_file)
+            outer.addWidget(browse_btn)
+
+            # --- Checkboxes ---
+            show_stats_cb = QCheckBox("Show stats")
+            show_stats_cb.setChecked(self._show_stats)
+
+            show_resists_cb = QCheckBox("Show resists")
+            show_resists_cb.setChecked(self._show_resists)
+
+            show_specials_cb = QCheckBox("Show special abilities")
+            show_specials_cb.setChecked(self._show_special_abilities)
+
+            lock_cb = QCheckBox("Lock overlay (click-through, Ctrl+Shift+L to toggle)")
+            lock_cb.setChecked(self._locked)
+
+            def toggle_stats(state):
+                self._show_stats = show_stats_cb.isChecked()
+                if self.config:
+                    self.config.set_show_stats(self._show_stats)
+                self._apply_visibility()
+                if self._last_resists:
+                    self.update_display(self._last_resists)
+
+            def toggle_resists(state):
+                self._show_resists = show_resists_cb.isChecked()
+                if self.config:
+                    self.config.set_show_resists(self._show_resists)
+                self._apply_visibility()
+                if self._last_resists:
+                    self.update_display(self._last_resists)
+
+            def toggle_specials(state):
+                self._show_special_abilities = show_specials_cb.isChecked()
+                if self.config:
+                    self.config.set_show_special_abilities(self._show_special_abilities)
+                self._apply_visibility()
+                _apply_specials_filter_visibility()
+                if self._last_resists:
+                    self.update_display(self._last_resists)
+
+            def toggle_lock(state):
+                self._locked = lock_cb.isChecked()
+                if self.config:
+                    self.config.set_overlay_locked(self._locked)
+                self._apply_click_through()
+                self._refresh_tray_menu()
+
+            show_stats_cb.stateChanged.connect(toggle_stats)
+            show_resists_cb.stateChanged.connect(toggle_resists)
+            show_specials_cb.stateChanged.connect(toggle_specials)
+            lock_cb.stateChanged.connect(toggle_lock)
+
+            outer.addWidget(show_stats_cb)
+            outer.addWidget(show_resists_cb)
+            outer.addWidget(show_specials_cb)
+            outer.addWidget(lock_cb)
+
+            # --- Opacity slider ---
+            opacity_widget = QWidget()
+            opacity_layout = QHBoxLayout(opacity_widget)
+            opacity_layout.setContentsMargins(0, 0, 0, 0)
+
+            opacity_layout.addWidget(QLabel("Opacity:"))
+
+            opacity_slider = QSlider(Qt.Orientation.Horizontal)
+            opacity_slider.setMinimum(30)
+            opacity_slider.setMaximum(100)
+            opacity_slider.setValue(int(self._bg_opacity * 100))
+            opacity_layout.addWidget(opacity_slider, stretch=1)
+
+            opacity_val = QLabel(f"{int(self._bg_opacity * 100)}%")
+            opacity_val.setFixedWidth(40)
+            opacity_layout.addWidget(opacity_val)
+
+            def on_opacity_change(val):
+                self._bg_opacity = max(0.3, min(1.0, val / 100.0))
+                opacity_val.setText(f"{val}%")
+                self.update()  # repaint background
+                if self.config:
+                    self.config.set_overlay_opacity(self._bg_opacity)
+
+            opacity_slider.valueChanged.connect(on_opacity_change)
+            outer.addWidget(opacity_widget)
+
+            # --- Special abilities filter ---
+            specials_group = QGroupBox("Special abilities to show")
+            specials_outer = QVBoxLayout(specials_group)
+
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setMaximumHeight(260)
+            inner_widget = QWidget()
+            inner_layout = QGridLayout(inner_widget)
+            inner_layout.setContentsMargins(4, 4, 4, 4)
+
+            for idx, (aid, name) in enumerate(sorted(SPECIAL_ABILITIES.items(), key=lambda x: x[0])):
+                enabled = self._specials_filter.get(str(aid), True)
+                cb = QCheckBox(f"{aid}: {name}")
+                cb.setChecked(bool(enabled))
+
+                def _make_cmd(_aid=aid, _cb=cb):
+                    def _cmd(state):
+                        self._specials_filter[str(_aid)] = _cb.isChecked()
+                        if self.config:
+                            self.config.set_special_ability_enabled(_aid, _cb.isChecked())
+                        if self._last_resists:
+                            self.update_display(self._last_resists)
+                    return _cmd
+
+                cb.stateChanged.connect(_make_cmd())
+                inner_layout.addWidget(cb, idx // 2, idx % 2)
+
+            scroll.setWidget(inner_widget)
+            specials_outer.addWidget(scroll)
+            outer.addWidget(specials_group)
+
+            def _apply_specials_filter_visibility():
+                specials_group.setVisible(self._show_special_abilities)
+
+            _apply_specials_filter_visibility()
+
+            outer.addStretch()
+
+            def _on_close():
                 self._settings_win = None
 
-        settings_win.protocol("WM_DELETE_WINDOW", _on_close)
+            dlg.finished.connect(lambda _: _on_close())
+            dlg.show()
 
-    def _apply_geometry(self):
-        try:
-            self.root.update_idletasks()
-        except Exception:
-            return
+        # ---- Share to clipboard ---------------------------------------------
 
-        height = None
-        try:
-            if self._main_frame is not None:
-                height = int(self._main_frame.winfo_reqheight())
-            else:
-                height = int(self.root.winfo_reqheight())
-        except Exception:
-            height = 60
+        def share_to_raid(self):
+            resists = self._last_resists
+            if not resists:
+                return
 
-        # Add a tiny buffer so the last row never clips.
-        height = max(40, int(height) + 2)
+            name = resists.get('display_name') or resists.get('name')
+            if not name or str(name).strip() in ('---', ''):
+                return
 
-        # Preserve current position during geometry updates.
-        try:
             try:
-                x_now = int(self.root.winfo_x())
-                y_now = int(self.root.winfo_y())
-                if not (x_now == 0 and y_now == 0):
-                    self._x, self._y = x_now, y_now
+                parts = [str(name).strip()]
+
+                if self._show_stats:
+                    try:
+                        level = format_level_text(resists.get('level', '--'), resists.get('maxlevel', 0))
+                        hp = resists.get('hp', '--')
+                        mana = resists.get('mana', '--')
+                        ac = resists.get('ac', '--')
+                        mindmg = resists.get('mindmg', 0)
+                        maxdmg = resists.get('maxdmg', 0)
+                        try:
+                            mindmg_i = int(mindmg or 0)
+                            maxdmg_i = int(maxdmg or 0)
+                            dmg_text = "--" if (mindmg_i == 0 and maxdmg_i == 0) else f"{mindmg_i}-{maxdmg_i}"
+                        except Exception:
+                            dmg_text = "--"
+                        parts.append(f"Lv:{level} HP:{hp} Mana:{mana} AC:{ac} Dmg:{dmg_text}")
+                    except Exception:
+                        pass
+
+                if self._show_resists:
+                    parts.append(
+                        f"MR:{resists.get('MR')} CR:{resists.get('CR')} DR:{resists.get('DR')} "
+                        f"FR:{resists.get('FR')} PR:{resists.get('PR')}"
+                    )
+
+                if self._show_special_abilities:
+                    raw = resists.get('special_abilities') or ''
+                    ids = parse_special_abilities_ids(raw) if raw else []
+                    filtered = []
+                    for aid in ids:
+                        if self._specials_filter.get(str(aid), True):
+                            label = SPECIAL_ABILITIES.get(aid)
+                            if label:
+                                filtered.append(label)
+                    if filtered:
+                        parts.append(", ".join(filtered))
+
+                msg = " | ".join([p for p in parts if p and str(p).strip()])
+
+                clipboard = QApplication.clipboard()
+                if clipboard:
+                    clipboard.setText(msg)
+                print(f"Copied to clipboard: {msg}")
+            except Exception as e:
+                print(f"Failed to copy share message to clipboard: {e}")
+                return
+
+            # Brief visual feedback
+            try:
+                self.share_btn.setText("Copied!")
+                QTimer.singleShot(900, lambda: self.share_btn.setText("Share"))
             except Exception:
                 pass
 
-            self._is_applying_geometry = True
-            self.root.geometry(f"{self._width}x{height}+{self._x}+{self._y}")
-        except Exception:
-            pass
-        finally:
-            self._is_applying_geometry = False
+        # ---- Thread-safe NPC update -----------------------------------------
 
-    def _apply_visibility(self):
-        try:
-            if self._show_stats:
-                self.stats_frame.grid()
-            else:
-                self.stats_frame.grid_remove()
-        except Exception:
-            pass
+        def on_npc_consider(self, resists):
+            """Called from the watcher thread. Emits signal to marshal to GUI thread."""
+            self.npc_updated.emit(resists)
 
-        try:
-            if self._show_resists:
-                self.resist_frame.grid()
-            else:
-                self.resist_frame.grid_remove()
-        except Exception:
-            pass
+        def _on_npc_updated(self, resists):
+            """Slot running on the GUI thread."""
+            try:
+                self.update_display(resists)
+            except Exception as e:
+                print(f"Error in display update: {e}")
 
-        try:
-            if self._show_special_abilities:
-                self.special_label.grid()
-            else:
-                self.special_label.grid_remove()
-        except Exception:
-            pass
+        # ---- Display update -------------------------------------------------
 
-        self._apply_geometry()
+        def update_display(self, resists):
+            self._last_resists = dict(resists) if resists else None
 
-    def _format_specials(self, labels: str) -> str:
-        items = [p.strip() for p in str(labels).split(',') if p.strip()]
-        if not items:
-            return ""
-
-        lines = []
-        current = []
-        limit = int(self._specials_wrap_chars) if self._specials_wrap_chars else 62
-
-        for item in items:
-            candidate = ", ".join(current + [item])
-            if current and len(candidate) > limit:
-                lines.append(current)
-                current = [item]
-            else:
-                current.append(item)
-
-        if current:
-            lines.append(current)
-
-        line_texts = []
-        for idx, line_items in enumerate(lines):
-            text = ", ".join(line_items)
-            if idx < len(lines) - 1:
-                text += ","
-            line_texts.append(text)
-
-        return "\n".join(line_texts)
-
-    def share_to_raid(self):
-        resists = self._last_resists
-        if not resists:
-            return
-
-        name = resists.get('display_name') or resists.get('name')
-        if not name or str(name).strip() in ('---', ''):
-            return
-
-        try:
-            parts = [str(name).strip()]
-
-            if self._show_stats:
+            # Stats
+            try:
+                level = format_level_text(resists.get('level', '--'), resists.get('maxlevel', 0))
+                hp = resists.get('hp', '--')
+                mana = resists.get('mana', '--')
+                ac = resists.get('ac', '--')
+                mindmg = resists.get('mindmg', 0)
+                maxdmg = resists.get('maxdmg', 0)
+                self.stats_labels['level'].setText(f"Lv:{level}")
+                self.stats_labels['hp'].setText(f"HP:{hp}")
+                self.stats_labels['mana'].setText(f"Mana:{mana}")
+                self.stats_labels['ac'].setText(f"AC:{ac}")
                 try:
-                    level = format_level_text(resists.get('level', '--'), resists.get('maxlevel', 0))
-                    hp = resists.get('hp', '--')
-                    mana = resists.get('mana', '--')
-                    ac = resists.get('ac', '--')
-                    mindmg = resists.get('mindmg', 0)
-                    maxdmg = resists.get('maxdmg', 0)
-                    try:
-                        mindmg_i = int(mindmg or 0)
-                        maxdmg_i = int(maxdmg or 0)
-                        dmg_text = "--" if (mindmg_i == 0 and maxdmg_i == 0) else f"{mindmg_i}-{maxdmg_i}"
-                    except Exception:
-                        dmg_text = "--"
-                    parts.append(f"Lv:{level} HP:{hp} Mana:{mana} AC:{ac} Dmg:{dmg_text}")
+                    mindmg_i = int(mindmg or 0)
+                    maxdmg_i = int(maxdmg or 0)
+                    dmg_text = "--" if (mindmg_i == 0 and maxdmg_i == 0) else f"{mindmg_i}-{maxdmg_i}"
                 except Exception:
-                    pass
+                    dmg_text = "--"
+                if 'dmg' in self.stats_labels:
+                    self.stats_labels['dmg'].setText(f"Dmg:{dmg_text}")
+            except Exception:
+                pass
 
-            if self._show_resists:
-                parts.append(
-                    f"MR:{resists.get('MR')} CR:{resists.get('CR')} DR:{resists.get('DR')} "
-                    f"FR:{resists.get('FR')} PR:{resists.get('PR')}"
-                )
+            # NPC name + zone
+            display_name = resists.get('display_name') or resists.get('name') or '---'
+            zone_long = resists.get('current_zone_long')
+            zone_short = resists.get('current_zone_short')
+            zone_text = None
+            try:
+                if zone_long and str(zone_long).strip():
+                    zone_text = str(zone_long).strip()
+                elif zone_short and str(zone_short).strip():
+                    zone_text = str(zone_short).strip()
+            except Exception:
+                zone_text = None
+            if not zone_text:
+                zone_text = 'Unknown'
+            display_name = f"{display_name} ({zone_text})"
+            try:
+                if resists.get('ambiguous') and '(?)' not in str(display_name):
+                    display_name = f"{display_name} (?)"
+            except Exception:
+                pass
+            self.name_label.setText(str(display_name)[:64])
 
+            # Resists
+            for key in self.resist_labels:
+                value = resists.get(key, 0)
+                color = _resist_color(value)
+                self.resist_labels[key].setText(f"{key}:{value}")
+                self.resist_labels[key].setStyleSheet(_make_label_style(color, 10, True))
+
+            # Special abilities
             if self._show_special_abilities:
                 raw = resists.get('special_abilities') or ''
                 ids = parse_special_abilities_ids(raw) if raw else []
                 filtered = []
                 for aid in ids:
                     if self._specials_filter.get(str(aid), True):
-                        label = SPECIAL_ABILITIES.get(aid)
-                        if label:
-                            filtered.append(label)
-                if filtered:
-                    parts.append(", ".join(filtered))
+                        name = SPECIAL_ABILITIES.get(aid)
+                        if name:
+                            filtered.append(name)
+                labels = ", ".join(filtered)
+                if labels:
+                    self.special_label.setText(self._format_specials(labels))
+                else:
+                    self.special_label.setText("-")
 
-            msg = " | ".join([p for p in parts if p and str(p).strip()])
-            self.root.clipboard_clear()
-            self.root.clipboard_append(msg)
-            self.root.update_idletasks()
-            print(f"Copied to clipboard: {msg}")
-        except Exception as e:
-            print(f"Failed to copy share message to clipboard: {e}")
-            return
+            self._apply_visibility()
 
-        # Tiny feedback without a dialog
-        try:
-            self.share_btn.config(text="Copied!")
-            self.root.after(900, lambda: self.share_btn.config(text="Share"))
-        except Exception:
-            pass
+        def _format_specials(self, labels: str) -> str:
+            items = [p.strip() for p in str(labels).split(',') if p.strip()]
+            if not items:
+                return ""
+            lines = []
+            current = []
+            limit = int(self._specials_wrap_chars) if self._specials_wrap_chars else 72
+            for item in items:
+                candidate = ", ".join(current + [item])
+                if current and len(candidate) > limit:
+                    lines.append(current)
+                    current = [item]
+                else:
+                    current.append(item)
+            if current:
+                lines.append(current)
+            line_texts = []
+            for idx, line_items in enumerate(lines):
+                text = ", ".join(line_items)
+                if idx < len(lines) - 1:
+                    text += ","
+                line_texts.append(text)
+            return "\n".join(line_texts)
 
-    def update_display(self, resists):
-        """Update overlay with NPC data"""
-        debug_specials = False
-        try:
-            debug_specials = bool(os and os.environ.get('EQ_OVERLAY_DEBUG_SPECIALS') == '1')
-        except Exception:
-            debug_specials = False
+        # ---- Close / cleanup ------------------------------------------------
 
-        self._last_resists = dict(resists) if resists else None
+        def _on_close(self):
+            self._cleanup_hotkey()
+            if self._tray_icon is not None:
+                self._tray_icon.hide()
+                self._tray_icon = None
+            QApplication.instance().quit()
 
-        # Stats
-        try:
-            level = format_level_text(resists.get('level', '--'), resists.get('maxlevel', 0))
-            hp = resists.get('hp', '--')
-            mana = resists.get('mana', '--')
-            ac = resists.get('ac', '--')
-            mindmg = resists.get('mindmg', 0)
-            maxdmg = resists.get('maxdmg', 0)
-            self.stats_labels['level'].config(text=f"Lv:{level}")
-            self.stats_labels['hp'].config(text=f"HP:{hp}")
-            self.stats_labels['mana'].config(text=f"Mana:{mana}")
-            self.stats_labels['ac'].config(text=f"AC:{ac}")
-            try:
-                mindmg_i = int(mindmg or 0)
-                maxdmg_i = int(maxdmg or 0)
-                dmg_text = "--" if (mindmg_i == 0 and maxdmg_i == 0) else f"{mindmg_i}-{maxdmg_i}"
-            except Exception:
-                dmg_text = "--"
-            if 'dmg' in self.stats_labels:
-                self.stats_labels['dmg'].config(text=f"Dmg:{dmg_text}")
-        except Exception:
-            pass
-        # Always show current zone next to NPC name.
-        display_name = resists.get('display_name') or resists.get('name') or '---'
-        zone_long = resists.get('current_zone_long')
-        zone_short = resists.get('current_zone_short')
-        zone_text = None
-        try:
-            if zone_long and str(zone_long).strip():
-                zone_text = str(zone_long).strip()
-            elif zone_short and str(zone_short).strip():
-                zone_text = str(zone_short).strip()
-        except Exception:
-            zone_text = None
+        def closeEvent(self, event):
+            self._on_close()
+            event.accept()
 
-        if not zone_text:
-            zone_text = 'Unknown'
-
-        display_name = f"{display_name} ({zone_text})"
-        try:
-            if resists.get('ambiguous') and '(?)' not in str(display_name):
-                display_name = f"{display_name} (?)"
-        except Exception:
-            pass
-        # Allow longer names since resists are on their own row.
-        self.name_label.config(text=str(display_name)[:64])
-        for key in self.resist_labels:
-            value = resists[key]
-            color = "green" if value < 0 else "red" if value > 50 else "orange"
-            self.resist_labels[key].config(text=f"{key}:{value}", foreground=color)
-
-        if self._show_special_abilities:
-            raw = resists.get('special_abilities') or ''
-            ids = parse_special_abilities_ids(raw) if raw else []
-            filtered = []
-            for aid in ids:
-                if self._specials_filter.get(str(aid), True):
-                    name = SPECIAL_ABILITIES.get(aid)
-                    if name:
-                        filtered.append(name)
-            labels = ", ".join(filtered)
-            if debug_specials:
-                try:
-                    raw_dbg = resists.get('special_abilities')
-                    print(f"[DEBUG] GUI show_specials=1 raw={raw_dbg!r} labels={labels!r}")
-                except Exception:
-                    pass
-            if labels:
-                self.special_label.config(text=self._format_specials(labels))
-            else:
-                self.special_label.config(text="-")
-
-        # If wrapping changes the requested height, resize the overlay.
-        self._apply_geometry()
+else:
+    # PyQt6 not available
+    ResistOverlayGUI = None

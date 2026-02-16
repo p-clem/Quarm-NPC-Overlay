@@ -26,6 +26,8 @@ class ConfigManager:
             'show_resists': True,
             # Whether to show special abilities in the overlay.
             'show_special_abilities': True,
+            # Whether the overlay is locked (click-through mode).
+            'overlay_locked': False,
             # Optional filter of which special ability IDs to show.
             # Stored as {"10": true, "14": false, ...}. Missing IDs default to shown.
             'special_abilities_filter': {},
@@ -142,4 +144,13 @@ class ConfigManager:
     def set_show_stats(self, value: bool):
         """Set and save whether to show level/HP/mana/AC stats in the overlay."""
         self.config['show_stats'] = bool(value)
+        return self.save_config()
+
+    def get_overlay_locked(self):
+        """Get whether the overlay is in click-through lock mode."""
+        return bool(self.config.get('overlay_locked', False))
+
+    def set_overlay_locked(self, value: bool):
+        """Set and save whether the overlay is in click-through lock mode."""
+        self.config['overlay_locked'] = bool(value)
         return self.save_config()

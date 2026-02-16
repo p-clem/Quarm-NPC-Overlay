@@ -3,6 +3,7 @@ import sys
 import traceback
 from pathlib import Path
 from datetime import datetime
+import threading
 
 # Setup logging before anything else
 # In packaged builds, we redirect stdout/stderr to overlay.log (there's no console).
@@ -23,7 +24,7 @@ if _log_to_file:
 from config_manager import ConfigManager
 from database import EQResistDatabase
 from log_watcher import EQLogWatcher
-from gui import ResistOverlayGUI, HAS_TK, tk, messagebox
+from gui import ResistOverlayGUI, HAS_QT
 
 
 def main():
@@ -210,15 +211,21 @@ def main():
                 print("Warning: no quarm.sql / quarm*.sql found")
                 print(msg)
                 try:
-                    if HAS_TK:
-                        messagebox.showwarning("Quarm NPC Overlay", msg)
+                    if HAS_QT:
+                        from PyQt6.QtWidgets import QApplication as _QApp, QMessageBox as _QMB
+                        _app = _QApp.instance() or _QApp(sys.argv)
+                        _QMB.warning(None, "Quarm NPC Overlay", msg)
                 except Exception:
                     pass
 
         # Create GUI overlay
-        if HAS_TK:
-            root = tk.Tk()
-            overlay = ResistOverlayGUI(root, config)
+        if HAS_QT:
+            from PyQt6.QtWidgets import QApplication, QMessageBox
+            from PyQt6.QtCore import QTimer
+
+            app = QApplication(sys.argv)
+            overlay = ResistOverlayGUI(config)
+            overlay.show()
 
             def _prompt_for_log_path_if_needed():
                 try:
@@ -228,53 +235,43 @@ def main():
                 except Exception:
                     pass
 
-            root.after(250, _prompt_for_log_path_if_needed)
+            QTimer.singleShot(250, _prompt_for_log_path_if_needed)
 
-            def on_npc_consider(resists):
-                try:
-                    overlay.update_display(resists)
-                    root.update()
-                except Exception as e:
-                    print(f"Error updating display: {e}")
-                    traceback.print_exc()
-
-            # Start watcher in background
-            watcher = EQLogWatcher(db, on_npc_consider, config)
+            # Start watcher in background — use overlay.on_npc_consider for thread-safe signal
+            watcher = EQLogWatcher(db, overlay.on_npc_consider, config)
 
             def watch_in_background():
                 try:
                     watcher.watch()
                 except KeyboardInterrupt:
-                    root.quit()
+                    app.quit()
                 except Exception as e:
                     print(f"Watcher error: {e}")
                     traceback.print_exc()
-
-            import threading
 
             watcher_thread = threading.Thread(target=watch_in_background, daemon=True)
             watcher_thread.start()
 
             print("\n[OK] Overlay running")
             print("[OK] Use /consider command in EQ to see NPC resistances")
-            print("[OK] Double-click or right-click the overlay to open settings")
+            print("[OK] Click the gear icon or right-click to open settings")
+            print("[OK] Ctrl+Shift+L to toggle click-through lock")
             print("[OK] Close window to exit\n")
 
-            root.mainloop()
+            sys.exit(app.exec())
         else:
-            print("Tkinter not available. Running in console mode.")
+            print("PyQt6 not available. Running in console mode.")
             watcher = EQLogWatcher(db, lambda r: print_resists(r), config)
             watcher.watch()
 
     except Exception as e:
         print(f"FATAL ERROR: {e}")
         traceback.print_exc()
-        if HAS_TK and tk and messagebox:
+        if HAS_QT:
             try:
-                root = tk.Tk()
-                root.withdraw()
-                messagebox.showerror("Error", f"Failed to start:\n\n{str(e)}\n\nCheck overlay.log for details")
-                root.destroy()
+                from PyQt6.QtWidgets import QApplication as _QApp, QMessageBox as _QMB
+                _app = _QApp.instance() or _QApp(sys.argv)
+                _QMB.critical(None, "Error", f"Failed to start:\n\n{str(e)}\n\nCheck overlay.log for details")
             except Exception:
                 pass
 

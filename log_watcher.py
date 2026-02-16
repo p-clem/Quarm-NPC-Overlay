@@ -28,6 +28,7 @@ class EQLogWatcher:
             re.IGNORECASE
         )
         self.entered_re = re.compile(r'^You have entered (?P<zone>.+?)\.$', re.IGNORECASE)
+        self.timestamp_re = re.compile(r'^\[.*?\]\s+')
 
     def _clear_current_zone(self):
         self.current_zone_long = None
@@ -82,7 +83,7 @@ class EQLogWatcher:
 
             lines = text.splitlines()
             for line in reversed(lines):
-                clean_line = re.sub(r'^\[.*?\]\s+', '', str(line).strip())
+                clean_line = self.timestamp_re.sub('', str(line).strip())
                 m_zone = self.entered_re.match(clean_line)
                 if m_zone:
                     zone_long = (m_zone.group('zone') or '').strip()
@@ -203,7 +204,7 @@ class EQLogWatcher:
 
                             for line in f:
                                 # Remove timestamp prefix [Day Mon DD HH:MM:SS YYYY]
-                                clean_line = re.sub(r'^\[.*?\]\s+', '', line.strip())
+                                clean_line = self.timestamp_re.sub('', line.strip())
 
                                 # Track current zone (helps disambiguate NPCs with non-unique names)
                                 try:
