@@ -1,12 +1,13 @@
 # Copilot instructions for Quarm NPC Overlay
 
 ## Big picture
-- Single-app Python overlay with three core pieces: log watcher, SQLite NPC resist DB, and Tkinter GUI, all in quarm_npc_overlay.py.
+- Single-app Python overlay with three core pieces: log watcher, SQLite NPC resist DB, and PyQt6 GUI (gui.py), wired together in quarm_npc_overlay.py.
 - Data flow: EverQuest log line -> regex parse (consider output) -> normalize NPC name (spaces→underscores, lower-case) -> SQLite lookup -> GUI update.
 - Releases ship with a prebuilt `npc_data.db` (built from a full Quarm SQL dump). A Quarm dump is only needed for rebuilding/updating the DB during release builds or manual refreshes.
 
 ## Key files to know
-- quarm_npc_overlay.py: main entry, ConfigManager, EQResistDatabase, EQLogWatcher, and GUI (ResistOverlayGUI).
+- quarm_npc_overlay.py: main entry, ConfigManager, EQResistDatabase, EQLogWatcher.
+- gui.py: PyQt6 ResistOverlayGUI — frameless overlay, settings dialog, system tray.
 - quarm.sql / quarm_*.sql: full dump used to build NPC + zone/spawn mapping.
 - load_db.py: helper to load quarm.sql into dist/npc_data.db (used for packaged builds).
 - Spec files: PyInstaller specs for packaged builds (no SQL dump is bundled).
@@ -17,10 +18,10 @@
 - Name normalization is essential: always convert spaces to underscores and strip leading “#” before DB lookup (see EQResistDatabase.get_npc_resists and EQLogWatcher.watch).
 - DB schema uses name_lower for case-insensitive exact matches (no LIKE searches in app logic).
 - Config is stored in config.json next to the script/exe; EQ log path can be auto-detected or user-specified via GUI.
-- Logging is redirected to overlay.log next to the script/exe before any Tkinter import.
+- Logging is redirected to overlay.log next to the script/exe before any GUI import.
 
 ## Workflows
-- Run from source: python quarm_npc_overlay.py (Tkinter GUI).
+- Run from source: python quarm_npc_overlay.py (PyQt6 GUI).
 - Build executable (Windows): run build.bat (PyInstaller onefile, windowed).
 - Prepare packaged DB: python load_db.py (writes dist/npc_data.db).
 - Quick checks: python test_complete.py, test_lookup_fixed.py, test_log_parsing.py.

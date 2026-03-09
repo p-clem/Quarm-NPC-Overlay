@@ -40,11 +40,9 @@ def _resist_color(value):
         v = int(value)
     except Exception:
         return "#aaaaaa"
-    if v < 0:
-        return "#44cc44"
-    if v > 50:
+    if v > 100:
         return "#ee4444"
-    return "#ee8822"
+    return "#44cc44"
 
 
 def _make_label_style(color="#ffffff", size=10, bold=True):
@@ -410,9 +408,13 @@ if HAS_QT:
                 except Exception:
                     self._settings_win = None
 
-            dlg = QDialog()
+            dlg = QDialog(self)
             dlg.setWindowTitle("Quarm NPC Overlay - Settings")
-            dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+            dlg.setWindowFlags(
+                Qt.WindowType.Dialog
+                | Qt.WindowType.WindowStaysOnTopHint
+                | Qt.WindowType.WindowCloseButtonHint
+            )
             dlg.resize(520, 620)
             self._settings_win = dlg
 

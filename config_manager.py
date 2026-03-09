@@ -15,7 +15,7 @@ class ConfigManager:
         """Load config from file"""
         defaults = {
             'eq_log_path': None,
-            # Tk alpha (0.0-1.0). Lower = more transparent.
+            # Alpha (0.0-1.0). Lower = more transparent.
             'overlay_opacity': 0.88,
             # Overlay window position (screen coordinates)
             # Stored as {"x": int, "y": int}
